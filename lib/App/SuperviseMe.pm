@@ -1,9 +1,8 @@
 package App::SuperviseMe;
-BEGIN {
-  $App::SuperviseMe::VERSION = '0.001';
-}
 
 # ABSTRACT: very simple command superviser
+our $VERSION = '0.002'; # VERSION
+our $AUTHORITY = 'cpan:MELO'; # AUTHORITY
 
 use strict;
 use warnings;
@@ -13,19 +12,20 @@ use AnyEvent;
 ##############
 # Constructors
 
-
 sub new {
   my ($class, %args) = @_;
 
   my $cmds = delete($args{cmds}) || [];
   $cmds = [$cmds] unless ref($cmds) eq 'ARRAY';
-  map { $_ = ref($_) ? $_ : {cmd => $_} } @$cmds;
+  for my $cmd (@$cmds) {
+    $cmd = [$cmd] unless ref($cmd) eq 'ARRAY';
+    $cmd = { cmd => $cmd };
+  }
 
   croak(q{Missing 'cmds',}) unless @$cmds;
 
-  return bless {cmds => $cmds}, $class;
+  return bless { cmds => $cmds }, $class;
 }
-
 
 sub new_from_options {
   my ($class) = @_;
@@ -49,17 +49,14 @@ sub new_from_options {
 ################
 # Start the show
 
-
 sub run {
   my $self = shift;
   my $sv   = AE::cv;
 
-  my $int_s =
-    AE::signal 'INT' => sub { $self->_signal_all_cmds('INT'); $sv->send };
-  my $term_s =
-    AE::signal 'TERM' => sub { $self->_signal_all_cmds('TERM'); $sv->send };
+  my $int_s  = AE::signal 'INT'  => sub { $self->_signal_all_cmds('INT');  $sv->send };
+  my $term_s = AE::signal 'TERM' => sub { $self->_signal_all_cmds('TERM'); $sv->send };
 
-  for my $cmd (@{$self->{cmds}}) {
+  for my $cmd (@{ $self->{cmds} }) {
     $self->_start_cmd($cmd);
   }
 
@@ -72,7 +69,7 @@ sub run {
 
 sub _start_cmd {
   my ($self, $cmd) = @_;
-  _debug("Starting '$cmd->{cmd}'");
+  _debug("Starting '@{$cmd->{cmd}}'");
 
   my $pid = fork();
   if (!defined $pid) {
@@ -83,13 +80,13 @@ sub _start_cmd {
 
   if ($pid == 0) {    ## Child
     $cmd = $cmd->{cmd};
-    _debug("Exec'ing '$cmd'");
-    exec($cmd);
+    _debug("Exec'ing '@$cmd'");
+    exec(@$cmd);
     exit(1);
   }
 
   ## parent
-  _debug("Watching pid $pid for '$cmd->{cmd}'");
+  _debug("Watching pid $pid for '@{$cmd->{cmd}}'");
   $cmd->{pid} = $pid;
   $cmd->{watcher} = AE::child $pid, sub { $self->_child_exited($cmd, @_) };
 
@@ -98,7 +95,7 @@ sub _start_cmd {
 
 sub _child_exited {
   my ($self, $cmd, undef, $status) = @_;
-  _debug("Child $cmd->{pid} exited, status $status: '$cmd->{cmd}'");
+  _debug("Child $cmd->{pid} exited, status $status: '@{$cmd->{cmd}}'");
 
   delete $cmd->{watcher};
   delete $cmd->{pid};
@@ -110,7 +107,7 @@ sub _child_exited {
 
 sub _restart_cmd {
   my ($self, $cmd) = @_;
-  _debug("Restarting cmd '$cmd->{cmd}' in 1 second");
+  _debug("Restarting cmd '@{$cmd->{cmd}}' in 1 second");
 
   my $t;
   $t = AE::timer 1, 0, sub { $self->_start_cmd($cmd); undef $t };
@@ -119,10 +116,10 @@ sub _restart_cmd {
 sub _signal_all_cmds {
   my ($self, $signal) = @_;
   _debug("Received signal $signal, exiting");
-  for my $cmd (@{$self->{cmds}}) {
+  for my $cmd (@{ $self->{cmds} }) {
     next unless my $pid = $cmd->{pid};
     _debug("... sent signal $signal to $pid");
-    kill($signal, $cmd->{pid}) if $pid;
+    kill($signal, $pid);
   }
 }
 
@@ -149,9 +146,14 @@ sub _error {
 
 1;
 
-
+__END__
 
 =pod
+
+=encoding utf-8
+
+=for :stopwords Pedro Melo ACKNOWLEDGEMENTS cpan testmatrix url annocpan anno bugtracker rt
+cpants kwalitee diff irc mailto metadata placeholders metacpan
 
 =head1 NAME
 
@@ -159,7 +161,7 @@ App::SuperviseMe - very simple command superviser
 
 =head1 VERSION
 
-version 0.001
+version 0.002
 
 =head1 SYNOPSIS
 
@@ -167,6 +169,7 @@ version 0.001
         cmds => [
           'plackup -p 3010 ./sites/x/app.psgi',
           'plackup -p 3011 ./sites/y/app.psgi',
+          ['bash', '-c', '... bash script ...'],
         ],
     );
     $superviser->run;
@@ -175,9 +178,11 @@ version 0.001
 
 This module implements a multi-process supervisor.
 
-It takes a list of commands to execute and starts each one, and then
-monitors their execution. If one of the program dies, the supervisor
-will restart it after a small 1 second pause.
+It takes a list of commands to execute and starts each one, and then monitors
+their execution. If one of the program dies, the supervisor will restart it
+after a small 1 second pause.
+
+=encoding utf8
 
 =head1 METHODS
 
@@ -193,7 +198,8 @@ It accepts a hash with the following options:
 
 =item cmds
 
-A list reference with the commands to execute and monitor.
+A list reference with the commands to execute and monitor. Each command can be
+a scalar, or a list reference.
 
 =back
 
@@ -202,8 +208,8 @@ A list reference with the commands to execute and monitor.
     my $supervisor = App::SuperviseMe->new_from_options;
 
 Reads the list of commands to start and monitor from C<STDIN>. It strips
-white-space from the beggining and end of the line, and skips lines that
-start with a C<#>.
+white-space from the beggining and end of the line, and skips lines that start
+with a C<#>.
 
 Returns the superviser object.
 
@@ -211,17 +217,89 @@ Returns the superviser object.
 
     $supervisor->run;
 
-Starts the supervisor, start all the child processes and monitors each
-one.
+Starts the supervisor, start all the child processes and monitors each one.
 
-This method returns when the supervisor is stopped with either a SIGINT
-or a SIGTERM.
-
-=encoding utf8
+This method returns when the supervisor is stopped with either a SIGINT or a
+SIGTERM.
 
 =head1 SEE ALSO
 
 L<AnyEvent>
+
+=head1 SUPPORT
+
+=head2 Perldoc
+
+You can find documentation for this module with the perldoc command.
+
+  perldoc App::SuperviseMe
+
+=head2 Websites
+
+The following websites have more information about this module, and may be of help to you. As always,
+in addition to those websites please use your favorite search engine to discover more resources.
+
+=over 4
+
+=item *
+
+MetaCPAN
+
+A modern, open-source CPAN search engine, useful to view POD in HTML format.
+
+L<http://metacpan.org/release/App-SuperviseMe>
+
+=item *
+
+CPAN Testers
+
+The CPAN Testers is a network of smokers who run automated tests on uploaded CPAN distributions.
+
+L<http://www.cpantesters.org/distro/A/App-SuperviseMe>
+
+=item *
+
+CPAN Testers Matrix
+
+The CPAN Testers Matrix is a website that provides a visual overview of the test results for a distribution on various Perls/platforms.
+
+L<http://matrix.cpantesters.org/?dist=App-SuperviseMe>
+
+=item *
+
+CPAN Testers Dependencies
+
+The CPAN Testers Dependencies is a website that shows a chart of the test results of all dependencies for a distribution.
+
+L<http://deps.cpantesters.org/?module=App::SuperviseMe>
+
+=item *
+
+CPAN Ratings
+
+The CPAN Ratings is a website that allows community ratings and reviews of Perl modules.
+
+L<http://cpanratings.perl.org/d/App-SuperviseMe>
+
+=back
+
+=head2 Email
+
+You can email the author of this module at C<MELO at cpan.org> asking for help with any problems you have.
+
+=head2 Bugs / Feature Requests
+
+Please report any bugs or feature requests through the web interface at L<https://github.com/melo/App-SuperviseMe/issues>. You will be automatically notified of any progress on the request by the system.
+
+=head2 Source Code
+
+The code is open to the world, and available for you to hack on. Please feel free to browse it and play
+with it, or whatever. If you want to contribute patches, please send me a diff or prod me to pull
+from your repository :)
+
+L<https://github.com/melo/App-SuperviseMe>
+
+  git clone git://github.com/melo/App-SuperviseMe.git
 
 =head1 AUTHOR
 
@@ -233,10 +311,6 @@ This software is Copyright (c) 2011 by Pedro Melo.
 
 This is free software, licensed under:
 
-  The Artistic License 2.0
+  The Artistic License 2.0 (GPL Compatible)
 
 =cut
-
-
-__END__
-
